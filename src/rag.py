@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.pydantic_v1 import BaseModel, Field
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.tools import TavilySearchResults
 from typing import List
 from typing_extensions import TypedDict
 from langgraph.graph import END, StateGraph, START
@@ -27,6 +27,7 @@ class RagGraph:
         self.initialise_query_rewriter()
         self.initialise_web_search_tool()
         self.initialise_rag_chain()
+        self.initialise_answer_grader()
         self.initialise_rag_workflow()
 
     def import_api_keys(self):
@@ -89,8 +90,8 @@ class RagGraph:
 
         self.query_rewriter = rewrite_prompt | self.llm | StrOutputParser()
 
-    def initialise_web_search_tool(self, k=3):
-        self.web_search_tool = TavilySearchResults(k=k)
+    def initialise_web_search_tool(self, k=10):
+        self.web_search_tool = TavilySearchResults(max_results=k, include_answer=True)
 
     def initialise_rag_chain(self):
         template = """Answer the question based only on the following context. Don't try to make up an answer.
@@ -103,6 +104,21 @@ class RagGraph:
         self.rag_chain = (RunnablePassthrough.assign(context=(lambda x: self.format_docs(x["context"])))
                           | prompt | self.llm | StrOutputParser())
 
+    def initialise_answer_grader(self):
+        class GradeAnswer(BaseModel):
+            """Binary score to assess answer addresses question."""
+            binary_score: str = Field(description="Answer addresses the question - 'yes' or 'no'")
+
+        structured_llm_grader = self.llm.with_structured_output(GradeAnswer)
+
+        answer_grader_system_prompt = """You are a grader assessing whether an answer addresses / resolves a question \n 
+             Give a binary score 'yes' or 'no'. Yes' means that the answer resolves the question."""
+
+        answer_prompt = ChatPromptTemplate.from_messages(
+            [("system", answer_grader_system_prompt),
+             ("human", "User question: \n\n {input} \n\n LLM generation: {generation}")])
+
+        self.answer_grader = answer_prompt | structured_llm_grader
 
     def retrieve(self, state):
         print("---RETRIEVE---")
@@ -171,6 +187,20 @@ class RagGraph:
             print("---DECISION: GENERATE---")
             return "generate"
 
+    def grade_generation_if_answers_question(self, state):
+        print("---CHECK WHETHER GENERATION ANSWERS QUESTION---")
+        inp = state["input"]
+        generation = state["generation"]
+
+        score = self.answer_grader.invoke({"input": inp, "generation": generation})
+        grade = score.binary_score
+        if grade == "yes":
+            print("---DECISION: GENERATION ANSWERS QUESTION---")
+            return "useful"
+        else:
+            print("---DECISION: GENERATION DOES NOT ANSWERS QUESTION---")
+            return "not_useful"
+
     def create_graph_nodes(self):
         # Define the nodes
         self.workflow.add_node("retrieve", self.retrieve)  # retrieve
@@ -188,7 +218,10 @@ class RagGraph:
             {"rewrite_query": "rewrite_query", "generate": "generate"})
         self.workflow.add_edge("rewrite_query", "web_search_node")
         self.workflow.add_edge("web_search_node", "generate")
-        self.workflow.add_edge("generate", END)
+        self.workflow.add_conditional_edges(
+            "generate", self.grade_generation_if_answers_question,
+            {"useful": END,
+             "not_useful": "rewrite_query"})
 
     def initialise_rag_workflow(self):
         self.workflow = StateGraph(GraphState)
@@ -209,7 +242,8 @@ if __name__ == "__main__":
     rag_graph = RagGraph()
     rag_app = rag_graph.app
     # question = "What's the temperature in London?"
-    question = "What's the temperature in Fort Worth?"
+    # question = "What's the temperature in Fort Worth?"
+    question = "What's the temperature in Patna?"
     res = rag_app.invoke({"input": question})
     print(res)
     print('Human:', question)
