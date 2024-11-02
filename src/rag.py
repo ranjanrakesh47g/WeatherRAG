@@ -24,10 +24,10 @@ class RagGraph:
         self.embedding_model = CustomEmbeddingModel()
         self.initialise_retriever()
         self.initialise_retrieval_grader()
-        self.initialise_query_rewriter()
         self.initialise_web_search_tool()
         self.initialise_rag_chain()
         self.initialise_answer_grader()
+        self.initialise_query_rewriter()
         self.initialise_rag_workflow()
 
     def import_api_keys(self):
@@ -79,18 +79,16 @@ class RagGraph:
 
         self.retrieval_grader = grade_prompt | structured_llm_grader
 
-    def initialise_query_rewriter(self):
-        rewrite_system_prompt = """You are a question re-writer that converts an input question to a better version that\
-         is optimized for web search. Look at the input and try to reason about the underlying \
-         semantic intent / meaning. While outputting, just output the improved query"""
+    def initialise_web_search_tool(self, k=10):
+        rewrite_system_prompt = """You are a question re-writer that converts an input question to a better version \ 
+        that is optimized for web search. Look at the input and try to reason about the underlying \ 
+        semantic intent / meaning. While outputting, just output the improved query"""
 
         rewrite_prompt = ChatPromptTemplate.from_messages(
             [("system", rewrite_system_prompt),
              ("human", "Here is the initial question: \n\n {input} \n Formulate an improved question.")])
 
-        self.query_rewriter = rewrite_prompt | self.llm | StrOutputParser()
-
-    def initialise_web_search_tool(self, k=10):
+        self.query_rewriter_for_search = rewrite_prompt | self.llm | StrOutputParser()
         self.web_search_tool = TavilySearchResults(max_results=k, include_answer=True)
 
     def initialise_rag_chain(self):
@@ -119,6 +117,17 @@ class RagGraph:
              ("human", "User question: \n\n {input} \n\n LLM generation: {generation}")])
 
         self.answer_grader = answer_prompt | structured_llm_grader
+
+    def initialise_query_rewriter(self):
+        rewrite_system_prompt = """You are a question re-writer that converts an input question to a better version \
+         that is optimized for vectorstore retrieval and highly context-rich. Look at the input and try to reason \
+         about the underlying semantic intent / meaning. While outputting, just output the improved query"""
+
+        rewrite_prompt = ChatPromptTemplate.from_messages(
+            [("system", rewrite_system_prompt),
+             ("human", "Here is the initial question: \n\n {input} \n Formulate an improved question.")])
+
+        self.query_rewriter = rewrite_prompt | self.llm | StrOutputParser()
 
     def retrieve(self, state):
         print("---RETRIEVE---")
@@ -155,26 +164,21 @@ class RagGraph:
         web_search = "No" if filtered_docs else "Yes"
         return {"documents": filtered_docs, "input": inp, "web_search": web_search}
 
-    def rewrite_query(self, state):
-        print("---REWRITE QUERY---")
-        inp = state["input"]
-        documents = state["documents"]
-
-        query_rewritten = self.query_rewriter.invoke({"input": inp})
-        print(f"---modified_query: {query_rewritten}---")
-        return {"documents": documents, "input": query_rewritten}
-
     def web_search(self, state):
         print("---WEB SEARCH---")
         inp = state["input"]
         documents = state["documents"]
 
-        docs = self.web_search_tool.invoke({"query": inp})
+        # Re-write query
+        query_rewritten = self.query_rewriter_for_search.invoke({"input": inp})
+        print(f"---modified_query: {inp}---")
+
+        docs = self.web_search_tool.invoke({"query": query_rewritten})
         web_results = "\n".join([d["content"] for d in docs])
         web_results = Document(page_content=web_results)
         documents.append(web_results)
 
-        return {"documents": documents, "input": inp}
+        return {"documents": documents, "input": query_rewritten}
 
     def decide_to_generate(self, state):
         print("---ASSESS GRADED DOCUMENTS---")
@@ -182,7 +186,7 @@ class RagGraph:
 
         if web_search == "Yes":
             print("---DECISION: NONE OF THE DOCUMENTS ARE RELEVANT TO QUERY, REWRITE QUERY---")
-            return "rewrite_query"
+            return "web_search"
         else:
             print("---DECISION: GENERATE---")
             return "generate"
@@ -201,13 +205,22 @@ class RagGraph:
             print("---DECISION: GENERATION DOES NOT ANSWERS QUESTION---")
             return "not_useful"
 
+    def rewrite_query(self, state):
+        print("---REWRITE QUERY---")
+        inp = state["input"]
+        documents = state["documents"]
+
+        query_rewritten = self.query_rewriter.invoke({"input": inp})
+        print(f"---modified_query: {query_rewritten}---")
+        return {"documents": documents, "input": query_rewritten}
+
     def create_graph_nodes(self):
         # Define the nodes
         self.workflow.add_node("retrieve", self.retrieve)  # retrieve
         self.workflow.add_node("grade_documents", self.grade_documents)  # grade documents
-        self.workflow.add_node("generate", self.generate)  # generatae
-        self.workflow.add_node("rewrite_query", self.rewrite_query)  # transform_query
         self.workflow.add_node("web_search_node", self.web_search)  # web search
+        self.workflow.add_node("generate", self.generate)  # generate
+        self.workflow.add_node("rewrite_query", self.rewrite_query)  # rewrite_query
 
     def create_graph_edges(self):
         # Build graph
@@ -215,13 +228,12 @@ class RagGraph:
         self.workflow.add_edge("retrieve", "grade_documents")
         self.workflow.add_conditional_edges(
             "grade_documents", self.decide_to_generate,
-            {"rewrite_query": "rewrite_query", "generate": "generate"})
-        self.workflow.add_edge("rewrite_query", "web_search_node")
+            {"web_search": "web_search_node", "generate": "generate"})
         self.workflow.add_edge("web_search_node", "generate")
         self.workflow.add_conditional_edges(
             "generate", self.grade_generation_if_answers_question,
-            {"useful": END,
-             "not_useful": "rewrite_query"})
+            {"useful": END, "not_useful": "rewrite_query"})
+        self.workflow.add_edge("rewrite_query", "retrieve")
 
     def initialise_rag_workflow(self):
         self.workflow = StateGraph(GraphState)
