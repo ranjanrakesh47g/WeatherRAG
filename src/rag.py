@@ -24,7 +24,7 @@ class RagGraph:
         self.embedding_model = CustomEmbeddingModel()
         self.initialise_retriever()
         self.initialise_retrieval_grader()
-        self.initialise_query_writer()
+        self.initialise_query_rewriter()
         self.initialise_web_search_tool()
         self.initialise_rag_chain()
         self.initialise_rag_workflow()
@@ -78,7 +78,7 @@ class RagGraph:
 
         self.retrieval_grader = grade_prompt | structured_llm_grader
 
-    def initialise_query_writer(self):
+    def initialise_query_rewriter(self):
         rewrite_system_prompt = """You are a question re-writer that converts an input question to a better version that\
          is optimized for web search. Look at the input and try to reason about the underlying \
          semantic intent / meaning. While outputting, just output the improved query"""
