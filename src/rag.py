@@ -1,6 +1,4 @@
 import os
-from select import select
-
 from indexer import CustomEmbeddingModel
 from api_keys import GROQ_API_KEY, TAVILY_API_KEY
 from langchain_core.documents import Document
