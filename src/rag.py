@@ -1,4 +1,6 @@
 import os
+from select import select
+
 from indexer import CustomEmbeddingModel
 from api_keys import GROQ_API_KEY, TAVILY_API_KEY
 from langchain_core.documents import Document
@@ -20,7 +22,8 @@ class RagGraph:
 
     def __init__(self):
         self.import_api_keys()
-        self.llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
+        # self.llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
+        self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
         self.embedding_model = CustomEmbeddingModel()
         self.initialise_retriever()
         self.initialise_retrieval_grader()
@@ -110,7 +113,7 @@ class RagGraph:
         structured_llm_grader = self.llm.with_structured_output(GradeAnswer)
 
         answer_grader_system_prompt = """You are a grader assessing whether an answer addresses / resolves a question \n 
-             Give a binary score 'yes' or 'no'. Yes' means that the answer resolves the question."""
+             Be a generous grader. Give a binary score 'yes' or 'no'. Yes' means that the answer resolves the question."""
 
         answer_prompt = ChatPromptTemplate.from_messages(
             [("system", answer_grader_system_prompt),
@@ -133,9 +136,31 @@ class RagGraph:
         print("---RETRIEVE---")
         inp = state["input"]
 
-        documents = self.retriever.get_relevant_documents(inp)
-        # documents = history_aware_retriever.get_relevant_documents(question)
-        return {"documents": documents, "input": inp}
+        try:
+            documents = self.retriever.get_relevant_documents(inp)
+            return {"documents": documents, "input": inp, "retriever_exception": False}
+        except:
+            return {"documents": [], "input": inp, "retriever_exception": True}
+
+    def decide_to_rewrite(self, state):
+        print("---CHECK RETRIEVER FOR EXCEPTION---")
+        retriever_exception = state["retriever_exception"]
+
+        if retriever_exception:
+            print("---DECISION: EXCEPTION OCCURRED! REWRITE QUERY---")
+            return "exception"
+        else:
+            print("---DECISION: NO EXCEPTION! GRADE DOCUMENTS---")
+            return "grade_documents"
+
+    def rewrite_query(self, state):
+        print("---REWRITE QUERY---")
+        inp = state["input"]
+        documents = state["documents"]
+
+        query_rewritten = self.query_rewriter.invoke({"input": inp})
+        print(f"---modified_query: {query_rewritten}---")
+        return {"documents": documents, "input": query_rewritten}
 
     def generate(self, state):
         print("---GENERATE---")
@@ -171,7 +196,7 @@ class RagGraph:
 
         # Re-write query
         query_rewritten = self.query_rewriter_for_search.invoke({"input": inp})
-        print(f"---modified_query: {inp}---")
+        print(f"---modified_query: {query_rewritten}---")
 
         docs = self.web_search_tool.invoke({"query": query_rewritten})
         web_results = "\n".join([d["content"] for d in docs])
@@ -185,7 +210,7 @@ class RagGraph:
         web_search = state["web_search"]
 
         if web_search == "Yes":
-            print("---DECISION: NONE OF THE DOCUMENTS ARE RELEVANT TO QUERY, REWRITE QUERY---")
+            print("---DECISION: NONE OF THE DOCUMENTS ARE RELEVANT TO QUERY, WEB SEARCH---")
             return "web_search"
         else:
             print("---DECISION: GENERATE---")
@@ -205,15 +230,6 @@ class RagGraph:
             print("---DECISION: GENERATION DOES NOT ANSWERS QUESTION---")
             return "not_useful"
 
-    def rewrite_query(self, state):
-        print("---REWRITE QUERY---")
-        inp = state["input"]
-        documents = state["documents"]
-
-        query_rewritten = self.query_rewriter.invoke({"input": inp})
-        print(f"---modified_query: {query_rewritten}---")
-        return {"documents": documents, "input": query_rewritten}
-
     def create_graph_nodes(self):
         # Define the nodes
         self.workflow.add_node("retrieve", self.retrieve)  # retrieve
@@ -225,7 +241,9 @@ class RagGraph:
     def create_graph_edges(self):
         # Build graph
         self.workflow.add_edge(START, "retrieve")
-        self.workflow.add_edge("retrieve", "grade_documents")
+        self.workflow.add_conditional_edges(
+            "retrieve", self.decide_to_rewrite,
+            {"exception": "rewrite_query", "grade_documents": "grade_documents"})
         self.workflow.add_conditional_edges(
             "grade_documents", self.decide_to_generate,
             {"web_search": "web_search_node", "generate": "generate"})
@@ -245,6 +263,7 @@ class RagGraph:
 class GraphState(TypedDict):
     """ Represents the state of our graph. """
     input: str
+    retriever_exception: bool
     generation: str
     web_search: str
     documents: List[str]
