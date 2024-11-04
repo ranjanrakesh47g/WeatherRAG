@@ -21,7 +21,8 @@ class RagGraph:
     def __init__(self):
         self.import_api_keys()
         # self.llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
-        self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
+        self.llm = ChatGroq(model="llama-3.2-90b-text-preview", temperature=0)
+        # self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
         self.embedding_model = CustomEmbeddingModel()
         self.initialise_retriever()
         self.initialise_retrieval_grader()
@@ -59,8 +60,9 @@ class RagGraph:
                 doc.metadata.update({"temperature": f"{doc.metadata["temperature"]}°C"})
             metadata = "\n".join([f"{key}: {value}" for key, value in doc.metadata.items()])
             formatted_docs.append(f"Context {i + 1}:-\nContent: {content}\nMetadata: {metadata}")
-            res = "\n\n".join(doc for doc in formatted_docs)
-            return res
+
+        res = "\n\n".join(doc for doc in formatted_docs)
+        return res
 
     def initialise_retrieval_grader(self):
 
@@ -72,7 +74,8 @@ class RagGraph:
 
         grader_system_prompt = """You are a grader assessing relevance of a retrieved document to a user question. \n 
             If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant. \n
-            Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
+            Be slightly generous. Give a binary score 'yes' or 'no' score to indicate whether the document is \
+            relevant to the question."""
 
         grade_prompt = ChatPromptTemplate.from_messages(
             [("system", grader_system_prompt),
@@ -80,7 +83,7 @@ class RagGraph:
 
         self.retrieval_grader = grade_prompt | structured_llm_grader
 
-    def initialise_web_search_tool(self, k=10):
+    def initialise_web_search_tool(self, k=5):
         rewrite_system_prompt = """You are a question re-writer that converts an input question to a better version \ 
         that is optimized for web search. Look at the input and try to reason about the underlying \ 
         semantic intent / meaning. While outputting, just output the improved query"""
@@ -272,8 +275,11 @@ if __name__ == "__main__":
     rag_app = rag_graph.app
     # question = "What's the temperature in London?"
     # question = "What's the temperature in Fort Worth?"
-    question = "What's the temperature in Patna?"
-    res = rag_app.invoke({"input": question})
+    # question = "What's the temperature in Patna?"
+    question = "Which cities have temperate climate?"
+    # question = "Where is it hottest?"
+    # question = "Where is it hottest among Paris, New York, and Warsaw?"
+    res = rag_app.invoke({"input": question}, config={"recursion_limit": 15})
     print(res)
     print('Human:', question)
     print('AI:', res['generation'])
