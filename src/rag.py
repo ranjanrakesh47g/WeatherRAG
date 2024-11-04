@@ -31,6 +31,9 @@ class RagGraph:
         self.initialise_answer_grader()
         self.initialise_query_rewriter()
         self.initialise_rag_workflow()
+        self.initialise_query_decomposer()
+        self.initialise_rag_chain_main()
+        self.initialise_rag_workflow_main()
 
     def import_api_keys(self):
         os.environ["GROQ_API_KEY"] = GROQ_API_KEY
@@ -132,6 +135,44 @@ class RagGraph:
              ("human", "Here is the initial question: \n\n {input} \n Formulate an improved question.")])
 
         self.query_rewriter = rewrite_prompt | self.llm | StrOutputParser()
+
+    def initialise_query_decomposer(self):
+        decomposition_system_prompt = """
+        You are a helpful assistant that prepares queries that will be sent to a search component.
+        Sometimes, these queries are very complex.
+        Your job is to simplify complex queries into multiple queries that can be answered
+        in isolation to each other. While outputting, just output the decomposed queries separated by '\n'.
+
+        If the query is simple, then keep it as it is.
+        Examples
+        1. Query: Did Microsoft or Google make more money last year?
+           Decomposed Queries: How much profit did Microsoft make last year?\nHow much profit did Google make last year?
+        2. Query: What is the capital of France?
+           Decomposed Queries: What is the capital of France?
+        3. Query: What are the names of the top 10 richest people?
+           Decomposed Queries: What are the names of the top 10 richest people?
+        4. Query: Which cities have sunny weather?
+           Decomposed Queries: Which cities have sunny weather?
+        5. Query: Where is it sunny?
+           Decomposed Queries: Where is it sunny?
+        """
+
+        decomposition_prompt = ChatPromptTemplate.from_messages(
+            [("system", decomposition_system_prompt),
+             ("human", "Here is the initial query: \n\n {input} \n Formulate the simpler decomposed queries.")])
+
+        self.query_decomposer = (decomposition_prompt | self.llm | StrOutputParser() | (lambda x: x.split("\n"))
+                                 | (lambda x: [x_i.strip() for x_i in x]))
+
+    def initialise_rag_chain_main(self):
+        template = """Answer the question based only on the following context. Don't try to make up an answer.
+        {context}
+
+        Question: {input}
+        """
+
+        prompt = ChatPromptTemplate(messages=[template])
+        self.rag_chain_main = prompt | self.llm | StrOutputParser()
 
     def retrieve(self, state):
         print("---RETRIEVE---")
@@ -260,9 +301,56 @@ class RagGraph:
         self.create_graph_edges()
         self.app = self.workflow.compile()
 
+    def decompose_query(self, state):
+        print("---DECOMPOSE QUERY---")
+        inp = state["input"]
+
+        sub_queries = self.query_decomposer.invoke({"input": inp})
+        print(f"---decomposed_queries: {sub_queries}--")
+        return {"input": inp, "sub_queries": sub_queries}
+
+    def answer_sub_queries(self, state):
+        print("---ANSWER SUB-QUERIES---")
+        sub_queries = state["sub_queries"]
+
+        sub_answers = []
+        for sub_query in sub_queries:
+            sub_answer = self.app.invoke({"input": sub_query})
+            sub_answer = sub_answer['generation']
+            sub_answers.append(sub_answer)
+
+        return {"sub_queries": sub_queries, "sub_answers": sub_answers}
+
+    def answer_query(self, state):
+        print("---ANSWER QUERY---")
+        inp = state["input"]
+        sub_answers = state["sub_answers"]
+
+        answer = self.rag_chain_main.invoke({"context": sub_answers, "input": inp})
+        return {"input": inp, "sub_answers": sub_answers, "answer": answer}
+
+    def create_graph_nodes_main(self):
+        # Define the nodes
+        self.workflow_main.add_node("decompose_query", self.decompose_query)  # decompose query
+        self.workflow_main.add_node("answer_sub_queries", self.answer_sub_queries)  # answer sub-queries
+        self.workflow_main.add_node("answer_query", self.answer_query)  # answer query
+
+    def create_graph_edges_main(self):
+        # Build graph
+        self.workflow_main.add_edge(START, "decompose_query")
+        self.workflow_main.add_edge("decompose_query", "answer_sub_queries")
+        self.workflow_main.add_edge("answer_sub_queries", "answer_query")
+        self.workflow_main.add_edge("answer_query", END)
+
+    def initialise_rag_workflow_main(self):
+        self.workflow_main = StateGraph(GraphStateMain)
+        self.create_graph_nodes_main()
+        self.create_graph_edges_main()
+        self.app_main = self.workflow_main.compile()
+
 
 class GraphState(TypedDict):
-    """ Represents the state of our graph. """
+    """ Represents the state of the util graph. """
     input: str
     retriever_exception: bool
     generation: str
@@ -270,16 +358,27 @@ class GraphState(TypedDict):
     documents: List[str]
 
 
+class GraphStateMain(TypedDict):
+    """ Represents the state of the main graph. """
+    input: str
+    chat_history: List[str]
+    reformulated_query: str
+    sub_queries: List[str]
+    sub_answers: List[str]
+    candidate_answer: str
+    answer: str
+
+
 if __name__ == "__main__":
     rag_graph = RagGraph()
-    rag_app = rag_graph.app
+    rag_app = rag_graph.app_main
     # question = "What's the temperature in London?"
     # question = "What's the temperature in Fort Worth?"
     # question = "What's the temperature in Patna?"
-    question = "Which cities have temperate climate?"
+    # question = "Which cities have temperate climate?"
     # question = "Where is it hottest?"
-    # question = "Where is it hottest among Paris, New York, and Warsaw?"
+    question = "Where is it hottest among Paris, New York, and Warsaw?"
     res = rag_app.invoke({"input": question}, config={"recursion_limit": 15})
     print(res)
     print('Human:', question)
-    print('AI:', res['generation'])
+    print('AI:', res['answer'])
