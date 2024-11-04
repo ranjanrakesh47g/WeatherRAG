@@ -19,10 +19,11 @@ from langgraph.graph import END, StateGraph, START
 class RagGraph:
 
     def __init__(self):
+        self.chat_history = []
         self.import_api_keys()
         # self.llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
-        self.llm = ChatGroq(model="llama-3.2-90b-text-preview", temperature=0)
-        # self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
+        # self.llm = ChatGroq(model="llama-3.2-90b-text-preview", temperature=0)
+        self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
         self.embedding_model = CustomEmbeddingModel()
         self.initialise_retriever()
         self.initialise_retrieval_grader()
@@ -32,8 +33,16 @@ class RagGraph:
         self.initialise_query_rewriter()
         self.initialise_rag_workflow()
         self.initialise_query_decomposer()
+        self.initialise_history_aware_query_reformulator()
+        self.initialise_conversation_aligner()
         self.initialise_rag_chain_main()
         self.initialise_rag_workflow_main()
+
+    def invoke(self, query, recursion_limit=15):
+        result = self.app_main.invoke({"input": query, "chat_history": self.chat_history},
+                                      config={"recursion_limit": recursion_limit})
+        self.chat_history += [query, result['answer']]
+        return result
 
     def import_api_keys(self):
         os.environ["GROQ_API_KEY"] = GROQ_API_KEY
@@ -136,6 +145,24 @@ class RagGraph:
 
         self.query_rewriter = rewrite_prompt | self.llm | StrOutputParser()
 
+    def initialise_history_aware_query_reformulator(self):
+        contextualize_q_prompt = """You are a query reformulator who, given a chat history and \
+        the latest user query, first thinks and checks \
+        if the user query doen't contain any references to past history and hence can be answered as an independent query. \
+        If YES, just return it as it is. \
+        If NO, reformulate it into a standalone query with the coreferences \
+        resolved, such that it can be understood without the chat history. \
+        DO NOT answer the query, just return it as is or reformulate it into standalone query if needed. \
+        While outputting, just output the actual/reformulated query.
+
+        Chat History: {chat_history}
+        User Query: {input}
+        Reformulated Query:
+        """
+
+        contextualize_q_prompt = ChatPromptTemplate.from_template(contextualize_q_prompt)
+        self.history_aware_query_reformulator = contextualize_q_prompt | self.llm | StrOutputParser()
+
     def initialise_query_decomposer(self):
         decomposition_system_prompt = """
         You are a helpful assistant that prepares queries that will be sent to a search component.
@@ -163,6 +190,25 @@ class RagGraph:
 
         self.query_decomposer = (decomposition_prompt | self.llm | StrOutputParser() | (lambda x: x.split("\n"))
                                  | (lambda x: [x_i.strip() for x_i in x]))
+
+    def initialise_conversation_aligner(self):
+        conversational_align_prompt = """You are an AI coversational assistant. Given chat_history, \
+        user query and candidate answer, check if the candidate answer is able to maintain the conversational flow. \
+        If YES, return the answer as it is. \
+        If NO, rephrase the candidate answer to more suit the query and the chat_history such that the conversation \
+        seems more fluid and natural. Also, ensure that the rephrased answer is more independent \
+        and does not include references to the past history. \
+        DO NOT add anything new in the answer, just return it as it is or rephrase it to align \
+        more with the conversation if needed. While outputting, just output the actual/rephrased answer.
+
+        Chat History: {chat_history}
+        User Query: {input}
+        Candidate Answer: {candidate_answer}
+        Answer:
+        """
+
+        conversational_align_prompt = ChatPromptTemplate.from_template(conversational_align_prompt)
+        self.conversation_aligner = conversational_align_prompt | self.llm | StrOutputParser()
 
     def initialise_rag_chain_main(self):
         template = """Answer the question based only on the following context. Don't try to make up an answer.
@@ -301,13 +347,26 @@ class RagGraph:
         self.create_graph_edges()
         self.app = self.workflow.compile()
 
+    def reformulate_query_using_history(self, state):
+        print("---REFORMULATE QUERY USING HISTORY---")
+        inp = state["input"]
+        chat_history = state["chat_history"]
+
+        if chat_history:
+            reformulated_query = self.history_aware_query_reformulator.invoke({"input": inp, "chat_history": chat_history})
+        else:
+            reformulated_query = inp
+
+        print(f"---reformulated_query: {reformulated_query}--")
+        return {"input": inp, "chat_history": chat_history, "reformulated_query": reformulated_query}
+
     def decompose_query(self, state):
         print("---DECOMPOSE QUERY---")
-        inp = state["input"]
+        reformulated_query = state["reformulated_query"]
 
-        sub_queries = self.query_decomposer.invoke({"input": inp})
+        sub_queries = self.query_decomposer.invoke({"input": reformulated_query})
         print(f"---decomposed_queries: {sub_queries}--")
-        return {"input": inp, "sub_queries": sub_queries}
+        return {"reformulated_query": reformulated_query, "sub_queries": sub_queries}
 
     def answer_sub_queries(self, state):
         print("---ANSWER SUB-QUERIES---")
@@ -323,24 +382,40 @@ class RagGraph:
 
     def answer_query(self, state):
         print("---ANSWER QUERY---")
-        inp = state["input"]
+        reformulated_query = state["reformulated_query"]
         sub_answers = state["sub_answers"]
 
-        answer = self.rag_chain_main.invoke({"context": sub_answers, "input": inp})
-        return {"input": inp, "sub_answers": sub_answers, "answer": answer}
+        answer = self.rag_chain_main.invoke({"context": sub_answers, "input": reformulated_query})
+        return {"reformulated_query": reformulated_query, "sub_answers": sub_answers, "candidate_answer": answer}
+
+    def maintain_conversational_flow(self, state):
+        print("---MAINTAIN CONVERSATIONAL FLOW---")
+        chat_history = state["chat_history"]
+        inp = state["input"]
+        candidate_answer = state["candidate_answer"]
+
+        answer = self.conversation_aligner.invoke(
+            {"chat_history": chat_history, "input": inp, "candidate_answer": candidate_answer})
+        return {"input": inp, "chat_history": chat_history, "candidate_answer": candidate_answer, "answer": answer}
 
     def create_graph_nodes_main(self):
         # Define the nodes
+        self.workflow_main.add_node("reformulate_query_using_history",
+                                    self.reformulate_query_using_history)  # reformulate query using history
         self.workflow_main.add_node("decompose_query", self.decompose_query)  # decompose query
         self.workflow_main.add_node("answer_sub_queries", self.answer_sub_queries)  # answer sub-queries
         self.workflow_main.add_node("answer_query", self.answer_query)  # answer query
+        self.workflow_main.add_node("maintain_conversational_flow",
+                                    self.maintain_conversational_flow)  # maintain conversational flow
 
     def create_graph_edges_main(self):
         # Build graph
-        self.workflow_main.add_edge(START, "decompose_query")
+        self.workflow_main.add_edge(START, "reformulate_query_using_history")
+        self.workflow_main.add_edge("reformulate_query_using_history", "decompose_query")
         self.workflow_main.add_edge("decompose_query", "answer_sub_queries")
         self.workflow_main.add_edge("answer_sub_queries", "answer_query")
-        self.workflow_main.add_edge("answer_query", END)
+        self.workflow_main.add_edge("answer_query", "maintain_conversational_flow")
+        self.workflow_main.add_edge("maintain_conversational_flow", END)
 
     def initialise_rag_workflow_main(self):
         self.workflow_main = StateGraph(GraphStateMain)
@@ -371,14 +446,16 @@ class GraphStateMain(TypedDict):
 
 if __name__ == "__main__":
     rag_graph = RagGraph()
-    rag_app = rag_graph.app_main
-    # question = "What's the temperature in London?"
-    # question = "What's the temperature in Fort Worth?"
-    # question = "What's the temperature in Patna?"
-    # question = "Which cities have temperate climate?"
-    # question = "Where is it hottest?"
-    question = "Where is it hottest among Paris, New York, and Warsaw?"
-    res = rag_app.invoke({"input": question}, config={"recursion_limit": 15})
-    print(res)
-    print('Human:', question)
-    print('AI:', res['answer'])
+    questions = ["What's the temperature in London?",
+                 "What's the temperature in Fort Worth?",
+                 "Which cities have temperate climate?",
+                 "Where is it hottest?",
+                 "Where is it raining?"]
+
+    for question in questions:
+        res = rag_graph.invoke(question)
+        print('-'*50)
+        print(res)
+        print('Human:', question)
+        print('AI:', res['answer'])
+        print('Chat History:', rag_graph.chat_history)
