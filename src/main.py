@@ -18,7 +18,7 @@ def chat(request: Request):
     query = request.query_params["query"]
     result = rag_app.invoke(query)
 
-    chat_history = rag_app.chat_history
+    chat_history = rag_app.chat_history.copy()
     for i, msg in enumerate(chat_history):
         if i % 2 == 0:
             chat_history[i] = f"User: {msg}"

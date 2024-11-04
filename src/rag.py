@@ -21,9 +21,9 @@ class RagGraph:
     def __init__(self):
         self.chat_history = []
         self.import_api_keys()
-        # self.llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
+        self.llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
         # self.llm = ChatGroq(model="llama-3.2-90b-text-preview", temperature=0)
-        self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
+        # self.llm = ChatGroq(model="llama-3.2-90b-vision-preview", temperature=0)
         self.embedding_model = CustomEmbeddingModel()
         self.initialise_retriever()
         self.initialise_retrieval_grader()
@@ -59,7 +59,7 @@ class RagGraph:
         ]
 
         vectorstore = ElasticsearchStore.from_documents([], self.embedding_model,
-                                                        index_name="weather_rag", es_url="http://192.168.1.103:9200")
+                                                        index_name="weather_rag", es_url="http://localhost:9200")
 
         self.retriever = SelfQueryRetriever.from_llm(self.llm, vectorstore, doc_content_info,
                                                 metadata_field_info, verbose=True)

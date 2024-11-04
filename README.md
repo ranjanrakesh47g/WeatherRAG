@@ -26,7 +26,7 @@ This is the rag-graph-main which works as follows:
 1. The query alongwith the chat history is first reformulated into a standalone query.
 2. The reformulated query is then decomposed into simpler subqueries.
 3. Each subquery is individually answered using the second rag-graph described below.
-4. All the subanswers to subqueries are combined to provide an answer to the reformulated in step 1.
+4. All the subanswers to subqueries are combined to provide an answer to the reformulated query in step 1.
 5. The answer is further refined to maintain conversational flow of the dialog.
 
 ![rag_graph_main](images/rag_graph_main.png)  
