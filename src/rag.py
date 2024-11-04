@@ -59,7 +59,7 @@ class RagGraph:
         ]
 
         vectorstore = ElasticsearchStore.from_documents([], self.embedding_model,
-                                                        index_name="weather_rag", es_url="http://localhost:9200")
+                                                        index_name="weather_rag", es_url="http://192.168.1.103:9200")
 
         self.retriever = SelfQueryRetriever.from_llm(self.llm, vectorstore, doc_content_info,
                                                 metadata_field_info, verbose=True)
@@ -452,7 +452,7 @@ if __name__ == "__main__":
                  "Where is it hottest?",
                  "Where is it raining?"]
 
-    for question in questions:
+    for question in questions[:1]:
         res = rag_graph.invoke(question)
         print('-'*50)
         print(res)
